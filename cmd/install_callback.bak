@@ -1,0 +1,300 @@
+#!/bin/bash
+
+# CrowdSec 安装回调脚本
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${TRIM_PKGVAR}/info.log"
+}
+
+# 确保配置目录存在
+if [ -z "$CROWDSEC_CONFIG_DIR" ]; then
+    CROWDSEC_CONFIG_DIR="/vol1/@appshare/crowdsec/crowdsec"
+fi
+
+# 确保 CONFIG_DIR 存在
+if [ -z "$CONFIG_DIR" ]; then
+    # 如果没有设置，从 CROWDSEC_CONFIG_DIR 推导
+    CONFIG_DIR="$(dirname "$CROWDSEC_CONFIG_DIR")"
+fi
+
+# 设置 nginx 日志配置的默认值
+if [ -z "$ENABLE_NGINX_LOGS" ]; then
+    ENABLE_NGINX_LOGS="true"
+fi
+if [ -z "$NGINX_LOG_PATH1" ]; then
+    NGINX_LOG_PATH1="/usr/trim/nginx/logs/*.log"
+fi
+if [ -z "$NGINX_LOG_PATH2" ]; then
+    NGINX_LOG_PATH2="/vol1/1000/docker/safeline/logs/nginx/safeline/accesslog_*"
+fi
+
+mkdir -p "$CROWDSEC_CONFIG_DIR"
+
+# 配置CrowdSec为本地模式运行
+log_msg "配置 CrowdSec 为本地模式..."
+log_msg "配置目录: $CROWDSEC_CONFIG_DIR"
+log_msg "数据目录: $CONFIG_DIR"
+log_msg "Nginx日志监控: $ENABLE_NGINX_LOGS"
+log_msg "Nginx日志路径1: $NGINX_LOG_PATH1"
+log_msg "Nginx日志路径2: $NGINX_LOG_PATH2"
+
+# 检查是否存在配置文件，如果不存在则从应用包中复制
+if [ ! -f "$CROWDSEC_CONFIG_DIR/config.yaml" ]; then
+    # 从应用包中复制配置文件
+    if [ -f "${TRIM_APPDEST}/server/config/config.yaml" ]; then
+        cp "${TRIM_APPDEST}/server/config/config.yaml" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        log_msg "Copied config.yaml from application package"
+        
+        # 也要复制其他必要的配置文件
+        for file in "local_api_credentials.yaml" "online_api_credentials.yaml" "acquis.yaml" "profiles.yaml" "simulation.yaml" "console.yaml" "dev.yaml"; do
+            if [ -f "${TRIM_APPDEST}/server/config/$file" ]; then
+                cp "${TRIM_APPDEST}/server/config/$file" "$CROWDSEC_CONFIG_DIR/$file"
+            fi
+        done
+    else
+        log_msg "WARNING: No config files found in application package"
+    fi
+fi
+
+if [ -f "$CROWDSEC_CONFIG_DIR/config.yaml" ]; then
+    # 更新 config.yaml 中的路径配置
+    sed -i "s|config_dir: /etc/crowdsec/|config_dir: $CROWDSEC_CONFIG_DIR/|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|data_dir: /var/lib/crowdsec/data/|data_dir: $CONFIG_DIR/data/|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|db_path: /var/lib/crowdsec/data/crowdsec.db|db_path: $CONFIG_DIR/data/crowdsec.db|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|simulation_path: /etc/crowdsec/simulation.yaml|simulation_path: $CROWDSEC_CONFIG_DIR/simulation.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|hub_dir: /etc/crowdsec/hub/|hub_dir: $CROWDSEC_CONFIG_DIR/hub/|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|index_path: /etc/crowdsec/hub/.index.json|index_path: $CROWDSEC_CONFIG_DIR/hub/.index.json|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|notification_dir: /etc/crowdsec/notifications/|notification_dir: $CROWDSEC_CONFIG_DIR/notifications/|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|acquisition_path: /etc/crowdsec/acquis.yaml|acquisition_path: $CROWDSEC_CONFIG_DIR/acquis.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|acquisition_dir: /etc/crowdsec/acquis.d|acquisition_dir: $CONFIG_DIR/acquis.d|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|profiles_path: /etc/crowdsec/profiles.yaml|profiles_path: $CROWDSEC_CONFIG_DIR/profiles.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|console_path: /etc/crowdsec/console.yaml|console_path: $CROWDSEC_CONFIG_DIR/console.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|credentials_path: /etc/crowdsec/local_api_credentials.yaml|credentials_path: $CROWDSEC_CONFIG_DIR/local_api_credentials.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    sed -i "s|credentials_path: /etc/crowdsec/online_api_credentials.yaml|credentials_path: $CROWDSEC_CONFIG_DIR/online_api_credentials.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    
+    # 确保API监听在请求的端口上
+    if [ -n "$TRIM_SERVICE_PORT" ] && [ "$TRIM_SERVICE_PORT" != "8080" ]; then
+        sed -i "s/listen_uri: 127.0.0.1:8080/listen_uri: 0.0.0.0:$TRIM_SERVICE_PORT/g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+    fi
+    
+    # 禁用online_client（云端API）
+    sed -i '/^api:/,/^$/ {
+        /online_client:/,/^\s*credentials_path:/ {
+            /enabled:/s/enabled:.*/enabled: false/
+        }
+    }' "$CROWDSEC_CONFIG_DIR/config.yaml"
+    
+    # 确保prometheus被禁用 - 使用更安全的sed命令
+    sed -i '/^prometheus:/,/^$/ {
+        /^\s*enabled:/d
+    }' "$CROWDSEC_CONFIG_DIR/config.yaml" 2>/dev/null || true
+    sed -i '/^prometheus:/a\  enabled: false' "$CROWDSEC_CONFIG_DIR/config.yaml" 2>/dev/null || true
+else
+    log_msg "WARNING: $CROWDSEC_CONFIG_DIR/config.yaml does not exist, CrowdSec may not start properly"
+fi
+
+# 确保API凭证中的URL端口与配置的端口一致
+if [ -f "$CROWDSEC_CONFIG_DIR/local_api_credentials.yaml" ]; then
+    if [ -n "$TRIM_SERVICE_PORT" ] && [ "$TRIM_SERVICE_PORT" != "8080" ]; then
+        sed -i "s|http://127.0.0.1:8080|http://127.0.0.1:$TRIM_SERVICE_PORT|g" "$CROWDSEC_CONFIG_DIR/local_api_credentials.yaml"
+    fi
+    # 确保即使当前端口不是8080，也要更新为正确的端口
+    sed -i "s|http://127.0.0.1:[0-9]*|http://127.0.0.1:$TRIM_SERVICE_PORT|g" "$CROWDSEC_CONFIG_DIR/local_api_credentials.yaml"
+fi
+
+# 更新Hub
+log_msg "更新 CrowdSec Hub..."
+${TRIM_APPDEST}/server/cscli hub update -c "$CROWDSEC_CONFIG_DIR/config.yaml" 2>/dev/null || true
+
+# 确保必要的目录存在
+mkdir -p "$CROWDSEC_CONFIG_DIR/hub"
+mkdir -p "$CROWDSEC_CONFIG_DIR/patterns"
+mkdir -p "$CONFIG_DIR/data"
+
+# 复制patterns文件（如果存在）
+if [ -d "${TRIM_APPDEST}/server/config/patterns" ]; then
+    cp -r "${TRIM_APPDEST}/server/config/patterns/"* "$CROWDSEC_CONFIG_DIR/patterns/" 2>/dev/null || true
+fi
+
+# 确保CrowdSec有所有必需的目录和文件
+mkdir -p "$CROWDSEC_CONFIG_DIR/hub"
+mkdir -p "$CROWDSEC_CONFIG_DIR/patterns"
+mkdir -p "$CONFIG_DIR/acquis.d"
+
+# 复制patterns文件
+if [ -d "${TRIM_APPDEST}/server/config/patterns" ]; then
+    cp -r "${TRIM_APPDEST}/server/config/patterns/"* "$CROWDSEC_CONFIG_DIR/patterns/" 2>/dev/null || true
+fi
+
+# 创建基本的acquisition配置，启用一些常见的日志源
+log_msg "创建基本的acquisition配置..."
+cat > "$CONFIG_DIR/acquis.d/basic.yaml" << 'EOF'
+filenames:
+  - /var/log/auth.log
+  - /var/log/syslog
+labels:
+  type: syslog
+---
+filenames:
+  - /var/log/nginx/*.log
+labels:
+  type: nginx
+---
+filenames:
+  - /var/log/apache2/*.log
+labels:
+  type: apache2
+EOF
+
+# 再次确保Hub索引存在
+log_msg "确保Hub索引存在..."
+${TRIM_APPDEST}/server/cscli hub update -c "$CROWDSEC_CONFIG_DIR/config.yaml" 2>/dev/null || true
+
+# 直接注册机器（不启动CrowdSec服务）
+log_msg "注册机器..."
+MACHINE_ID=$(cat /etc/machine-id 2>/dev/null | tr -d '\n' | head -c 32 || hostname | head -c 32)
+if [ -n "$MACHINE_ID" ]; then
+    # 使用 --force 强制覆盖已存在的凭证文件
+    if ${TRIM_APPDEST}/server/cscli machines add "$MACHINE_ID" -a --force -c "$CROWDSEC_CONFIG_DIR/config.yaml" 2>/dev/null; then
+        log_msg "机器注册成功"
+    else
+        log_msg "警告: 无法使用cscli注册机器"
+    fi
+else
+    log_msg "警告: 无法获取machine-id，无法注册机器"
+fi
+
+# 安装和配置 crowdsec-firewall-bouncer
+log_msg "安装和配置 crowdsec-firewall-bouncer..."
+
+BOUNCER_TGZ="${TRIM_APPDEST}/crowdsec-firewall-bouncer-linux-amd64.tgz"
+BOUNCER_INSTALL_DIR="/tmp/crowdsec-firewall-bouncer-installer"
+BOUNCER_BIN="/usr/local/bin/crowdsec-firewall-bouncer"
+BOUNCER_CONFIG="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+
+if [ -f "$BOUNCER_TGZ" ]; then
+    log_msg "解压 bouncer 压缩包..."
+    rm -rf "$BOUNCER_INSTALL_DIR"
+    mkdir -p "$BOUNCER_INSTALL_DIR"
+    cd "$BOUNCER_INSTALL_DIR"
+    tar xzf "$BOUNCER_TGZ"
+    
+    BOUNCER_DIR=$(ls -d crowdsec-firewall-bouncer-* 2>/dev/null | head -1)
+    
+    if [ -n "$BOUNCER_DIR" ] && [ -d "$BOUNCER_DIR" ]; then
+        cd "$BOUNCER_DIR"
+        
+        # 复制二进制文件
+        if [ -f "crowdsec-firewall-bouncer" ]; then
+            install -v -m 0755 crowdsec-firewall-bouncer "$BOUNCER_BIN" > /dev/null 2>&1
+            log_msg "Bouncer 二进制文件已安装"
+        fi
+        
+        # 安装配置文件（如果不存在）
+        if [ ! -f "$BOUNCER_CONFIG" ] && [ -f "config/crowdsec-firewall-bouncer.yaml" ]; then
+            install -D -m 0600 "config/crowdsec-firewall-bouncer.yaml" "$BOUNCER_CONFIG"
+            log_msg "Bouncer 配置文件已安装"
+        fi
+        
+        # 安装 systemd 服务文件
+        if [ -f "config/crowdsec-firewall-bouncer.service" ]; then
+            SYSTEMD_PATH="/etc/systemd/system/crowdsec-firewall-bouncer.service"
+            
+            # 替换变量
+            sed "s|\${BIN}|$BOUNCER_BIN|g; s|\${CFG}|/etc/crowdsec/bouncers|g" \
+                "config/crowdsec-firewall-bouncer.service" > "$SYSTEMD_PATH"
+            
+            systemctl daemon-reload
+            log_msg "Systemd 服务文件已安装"
+        fi
+        
+        # 生成 bouncer API 密钥
+        if [ -n "$TRIM_SERVICE_PORT" ]; then
+            log_msg "生成 bouncer API 密钥..."
+            API_KEY=$(${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" bouncers add crowdsec-firewall-bouncer 2>/dev/null | grep -A 1 "API key" | tail -1)
+            
+            if [ -n "$API_KEY" ]; then
+                # 更新配置文件
+                if [ -f "$BOUNCER_CONFIG" ]; then
+                    # 设置后端模式（nftables）
+                    sed -i 's|mode: ${BACKEND}|mode: nftables|g' "$BOUNCER_CONFIG"
+                    
+                    # 设置 API URL 和密钥
+                    sed -i "s|api_url: http://127.0.0.1:8080/|api_url: http://127.0.0.1:$TRIM_SERVICE_PORT/|g" "$BOUNCER_CONFIG"
+                    sed -i "s|api_key: \${API_KEY}|api_key: $API_KEY|g" "$BOUNCER_CONFIG"
+                    
+                    log_msg "Bouncer 配置已更新"
+                    
+                    # 启用并启动服务
+                    systemctl enable crowdsec-firewall-bouncer > /dev/null 2>&1
+                    systemctl restart crowdsec-firewall-bouncer > /dev/null 2>&1
+                    log_msg "CrowdSec Firewall Bouncer 已启动"
+                fi
+            else
+                log_msg "警告: 无法生成 bouncer API 密钥"
+            fi
+        fi
+        
+        # 清理临时文件
+        cd /
+        rm -rf "$BOUNCER_INSTALL_DIR"
+    fi
+else
+    log_msg "警告: Bouncer 压缩包未找到: $BOUNCER_TGZ"
+fi
+
+log_msg "CrowdSec 本地模式配置完成"
+echo "安装完成！"
+
+# 创建 cscli 符号链接，方便用户从命令行访问
+log_msg "创建 cscli 符号链接..."
+ln -sf ${TRIM_APPDEST}/server/cscli /usr/local/bin/cscli
+if [ $? -eq 0 ]; then
+    log_msg "cscli 符号链接创建成功"
+else
+    log_msg "警告: cscli 符号链接创建失败"
+fi
+
+# 配置 Nginx 日志监控
+log_msg "检查 Nginx 日志配置..."
+log_msg "ENABLE_NGINX_LOGS = '$ENABLE_NGINX_LOGS'"
+if [ "$ENABLE_NGINX_LOGS" = "true" ]; then
+    log_msg "启用 Nginx 日志监控"
+    
+    # 创建 nginx-custom-logs.yaml 配置文件
+    NGINX_CONFIG_FILE="$CONFIG_DIR/acquis.d/nginx-custom-logs.yaml"
+    
+    # 开始构建配置文件
+    echo "" > "$NGINX_CONFIG_FILE"
+    
+    # 添加第一个日志路径（如果存在）
+    if [ -n "$NGINX_LOG_PATH1" ]; then
+        echo "---" >> "$NGINX_CONFIG_FILE"
+        echo "filenames:" >> "$NGINX_CONFIG_FILE"
+        echo "  - $NGINX_LOG_PATH1" >> "$NGINX_CONFIG_FILE"
+        echo "labels:" >> "$NGINX_CONFIG_FILE"
+        echo "  type: nginx" >> "$NGINX_CONFIG_FILE"
+        log_msg "添加 Nginx 日志路径1: $NGINX_LOG_PATH1"
+    fi
+    
+    # 添加第二个日志路径（如果存在）
+    if [ -n "$NGINX_LOG_PATH2" ]; then
+        echo "---" >> "$NGINX_CONFIG_FILE"
+        echo "filenames:" >> "$NGINX_CONFIG_FILE"
+        echo "  - $NGINX_LOG_PATH2" >> "$NGINX_CONFIG_FILE"
+        echo "labels:" >> "$NGINX_CONFIG_FILE"
+        echo "  type: nginx" >> "$NGINX_CONFIG_FILE"
+        log_msg "添加 Nginx 日志路径2: $NGINX_LOG_PATH2"
+    fi
+    
+    # 验证配置文件是否为空
+    if [ -s "$NGINX_CONFIG_FILE" ]; then
+        log_msg "Nginx 日志配置文件创建成功: $NGINX_CONFIG_FILE"
+    else
+        log_msg "警告: Nginx 日志配置文件为空，请检查配置路径"
+        rm -f "$NGINX_CONFIG_FILE"
+    fi
+else
+    log_msg "Nginx 日志监控未启用"
+fi

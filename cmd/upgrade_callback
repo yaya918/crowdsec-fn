@@ -1,0 +1,17 @@
+#!/bin/bash
+
+# CrowdSec 升级回调脚本
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${TRIM_PKGVAR}/info.log"
+}
+
+log_msg "CrowdSec 升级完成"
+
+# 重新启用服务
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable crowdsec 2>/dev/null
+fi
+
+echo "CrowdSec 升级完成！"

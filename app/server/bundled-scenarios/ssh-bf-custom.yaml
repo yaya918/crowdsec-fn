@@ -1,0 +1,19 @@
+# 自定义 SSH 暴力破解规则 - 调整阈值以适应日志重复
+type: leaky
+name: crowdsecurity/ssh-bf-custom
+description: "Detect ssh bruteforce (adjusted for log duplication)"
+filter: "evt.Meta.log_type == 'ssh_failed-auth'"
+leakspeed: "10s"
+capacity: 12  # 原来是5，现在是12 (3次失败 x 4条重复)
+groupby: evt.Meta.source_ip
+blackhole: 1m
+reprocess: true
+labels:
+  service: ssh
+  confidence: 3
+  spoofable: 0
+  classification:
+    - attack.T1110
+  label: "SSH Bruteforce"
+  behavior: "ssh:bruteforce"
+  remediation: true

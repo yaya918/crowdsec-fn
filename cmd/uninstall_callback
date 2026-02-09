@@ -1,0 +1,178 @@
+#!/bin/bash
+
+# CrowdSec 卸载回调脚本
+
+# 设置配置目录
+if [[ -n "$TRIM_DATA_SHARE_PATHS" ]]; then
+    if [[ "$TRIM_DATA_SHARE_PATHS" == *:* ]]; then
+        DATA_DIR="${TRIM_DATA_SHARE_PATHS%%:*}"
+    else
+        DATA_DIR="$TRIM_DATA_SHARE_PATHS"
+    fi
+else
+    DATA_DIR="/vol1/@appshare/crowdsec"
+fi
+
+# CrowdSec 配置目录
+CROWDSEC_CONFIG_DIR="$DATA_DIR/crowdsec"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${TRIM_PKGVAR}/info.log"
+}
+
+log_msg "开始执行 CrowdSec 卸载清理..."
+
+# 恢复系统配置文件备份（如果存在）
+log_msg "检查并恢复系统配置文件备份..."
+
+# 恢复 SSH 配置文件备份
+SSHD_CONFIG="/etc/ssh/sshd_config"
+if [ -f "$SSHD_CONFIG" ]; then
+    # 查找最新的备份文件
+    SSH_BACKUP=$(ls -t ${SSHD_CONFIG}.backup.* 2>/dev/null | head -1)
+    if [ -n "$SSH_BACKUP" ]; then
+        log_msg "恢复 SSH 配置文件备份: $SSH_BACKUP"
+        cp "$SSH_BACKUP" "$SSHD_CONFIG"
+        # 重启SSH服务使配置生效
+        systemctl reload sshd > /dev/null 2>&1 || systemctl restart sshd > /dev/null 2>&1
+        log_msg "SSH服务已重载"
+        # 删除所有备份文件
+        rm -f ${SSHD_CONFIG}.backup.* 2>/dev/null || true
+    else
+        log_msg "未找到 SSH 配置文件备份"
+    fi
+fi
+
+# 恢复 rsyslog 配置文件备份
+RSYSLOG_CONFIG="/etc/rsyslog.conf"
+if [ -f "$RSYSLOG_CONFIG" ]; then
+    # 查找最新的备份文件
+    RSYSLOG_BACKUP=$(ls -t ${RSYSLOG_CONFIG}.backup.* 2>/dev/null | head -1)
+    if [ -n "$RSYSLOG_BACKUP" ]; then
+        log_msg "恢复 rsyslog 配置文件备份: $RSYSLOG_BACKUP"
+        cp "$RSYSLOG_BACKUP" "$RSYSLOG_CONFIG"
+        # 删除所有备份文件
+        rm -f ${RSYSLOG_CONFIG}.backup.* 2>/dev/null || true
+    else
+        log_msg "未找到 rsyslog 配置文件备份，尝试手动清理"
+    fi
+    
+    # 删除 CrowdSec 专用的 rsyslog 配置文件
+    if [ -f "/etc/rsyslog.d/99-crowdsec-ssh.conf" ]; then
+        log_msg "删除 CrowdSec SSH 日志格式配置文件"
+        rm -f "/etc/rsyslog.d/99-crowdsec-ssh.conf"
+    fi
+    
+    # 重启rsyslog服务使配置生效
+    systemctl restart rsyslog > /dev/null 2>&1
+    log_msg "rsyslog服务已重启"
+fi
+
+# 停止所有可能的 CrowdSec 进程
+log_msg "停止所有 CrowdSec 进程..."
+pkill -f crowdsec 2>/dev/null || true
+pkill -f cscli 2>/dev/null || true
+
+# 等待进程结束
+sleep 3
+
+# 停止 CrowdSec Firewall Bouncer
+log_msg "停止 CrowdSec Firewall Bouncer..."
+systemctl stop crowdsec-firewall-bouncer 2>/dev/null || true
+systemctl disable crowdsec-firewall-bouncer 2>/dev/null || true
+
+# 删除 bouncer（如果安装了）
+BOUNCER_BIN="/usr/local/bin/crowdsec-firewall-bouncer"
+BOUNCER_CONFIG="$CROWDSEC_CONFIG_DIR/bouncers/crowdsec-firewall-bouncer.yaml"
+BOUNCER_ID_FILE="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.id"
+
+if [ -f "$BOUNCER_ID_FILE" ]; then
+    # 删除 bouncer 注册
+    BOUNCER_ID=$(cat "$BOUNCER_ID_FILE" 2>/dev/null)
+    if [ -n "$BOUNCER_ID" ] && [ -f "$CROWDSEC_CONFIG_DIR/local_api_credentials.yaml" ]; then
+        ${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" bouncers delete "$BOUNCER_ID" 2>/dev/null || true
+        log_msg "Bouncer 注册已删除"
+    fi
+    rm -f "$BOUNCER_ID_FILE"
+fi
+
+# 删除 bouncer 文件
+rm -f "$BOUNCER_BIN" 2>/dev/null || true
+rm -f "$BOUNCER_CONFIG" 2>/dev/null || true
+rm -f "/etc/systemd/system/crowdsec-firewall-bouncer.service" 2>/dev/null || true
+rm -f "/var/log/crowdsec-firewall-bouncer.log" 2>/dev/null || true
+
+# 停止并删除 CrowdSec Web UI Docker 容器
+log_msg "停止并删除 CrowdSec Web UI Docker 容器..."
+DOCKER_COMPOSE_CMD=""
+if command -v docker-compose >/dev/null 2>&1; then
+    DOCKER_COMPOSE_CMD="docker-compose"
+elif docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE_CMD="docker compose"
+fi
+
+if [ -n "$DOCKER_COMPOSE_CMD" ]; then
+    if [ -f "${TRIM_APPDEST}/docker-compose.yml" ]; then
+        cd "${TRIM_APPDEST}"
+        $DOCKER_COMPOSE_CMD down -v 2>/dev/null || true
+        log_msg "CrowdSec Web UI Docker 容器已删除"
+    fi
+fi
+
+# 删除 Web UI Machine 账户
+log_msg "删除 CrowdSec Web UI Machine 账户..."
+if [ -f "$CROWDSEC_CONFIG_DIR/local_api_credentials.yaml" ]; then
+    ${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" machines delete crowdsec-web-ui 2>/dev/null || true
+    log_msg "Web UI Machine 账户已删除"
+fi
+
+# 删除 Web UI 密码文件
+rm -f "$DATA_DIR/web_ui_password.txt" 2>/dev/null || true
+
+# 卸载 CrowdSec 解析器（如果存在）
+log_msg "卸载 CrowdSec 解析器..."
+if [ -f "$CROWDSEC_CONFIG_DIR/local_api_credentials.yaml" ]; then
+    ${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" parsers remove crowdsecurity/syslog-logs 2>/dev/null || true
+    ${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" parsers remove crowdsecurity/dateparse-enrich 2>/dev/null || true
+    log_msg "CrowdSec 解析器已卸载"
+fi
+
+# 如果有 systemd 服务，也要停止和禁用它
+if command -v systemctl >/dev/null 2>&1; then
+    log_msg "停止并禁用 systemd 服务..."
+    systemctl daemon-reload 2>/dev/null || true
+fi
+
+# 清理系统级安装的文件（如果存在）
+log_msg "清理系统级安装的文件..."
+rm -f /usr/local/bin/crowdsec 2>/dev/null || true
+rm -f /usr/local/bin/cscli 2>/dev/null || true
+rm -f /etc/systemd/system/crowdsec.service 2>/dev/null || true
+
+# 根据用户选择决定是否删除数据
+if [ "$wizard_data_action" = "delete" ]; then
+    # 删除配置和数据
+    log_msg "删除 CrowdSec 配置和数据..."
+    rm -rf /etc/crowdsec 2>/dev/null || true
+    rm -rf /var/lib/crowdsec 2>/dev/null || true
+    rm -rf /var/log/crowdsec* 2>/dev/null || true
+    
+    # 删除应用共享目录中的数据（如果指定了删除）
+    rm -rf "$DATA_DIR/crowdsec" 2>/dev/null || true
+    rm -rf "$DATA_DIR/data" 2>/dev/null || true
+    rm -rf "$DATA_DIR/acquis.d" 2>/dev/null || true
+    
+    # 删除 rsyslog state 文件
+    rm -f /var/spool/rsyslog/imjournal.state 2>/dev/null || true
+else
+    log_msg "保留用户数据"
+fi
+
+log_msg "CrowdSec 卸载清理完成"
+
+if [ "$wizard_data_action" = "delete" ]; then
+    echo "CrowdSec 已完全卸载，系统级文件和数据已删除"
+else
+    echo "CrowdSec 已卸载，系统级文件已清理，用户数据已保留"
+fi

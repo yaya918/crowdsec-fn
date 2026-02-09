@@ -1,0 +1,17 @@
+#!/bin/bash
+
+# CrowdSec 升级初始化脚本
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${TRIM_PKGVAR}/info.log"
+}
+
+log_msg "开始升级 CrowdSec..."
+
+# 停止当前服务
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop crowdsec 2>/dev/null
+fi
+
+echo "CrowdSec 升级中..."

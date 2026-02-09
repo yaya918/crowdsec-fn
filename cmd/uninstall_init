@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# CrowdSec 卸载初始化脚本
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${TRIM_PKGVAR}/info.log"
+}
+
+log_msg "开始卸载 CrowdSec..."
+

@@ -1,0 +1,57 @@
+#!/bin/bash
+
+# CrowdSec 安装初始化脚本
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${TRIM_PKGVAR}/info.log"
+}
+
+log_msg "开始安装 CrowdSec..."
+
+# 从向导获取配置
+CROWDSEC_PORT="18081"
+ENABLE_LOCAL_MODE="${wizard_enable_local_mode:-true}"
+ENABLE_NGINX_LOGS="${wizard_enable_nginx_logs:-true}"
+NGINX_LOG_PATH1="${wizard_nginx_log_path1:-}"
+NGINX_LOG_PATH2="${wizard_nginx_log_path2:-}"
+
+log_msg "配置参数: 端口=$CROWDSEC_PORT, 本地模式=$ENABLE_LOCAL_MODE, Nginx日志=$ENABLE_NGINX_LOGS"
+log_msg "Nginx日志路径1: $NGINX_LOG_PATH1"
+log_msg "Nginx日志路径2: $NGINX_LOG_PATH2"
+
+# 创建必要的目录
+if [[ -n "$TRIM_DATA_SHARE_PATHS" ]]; then
+    if [[ "$TRIM_DATA_SHARE_PATHS" == *:* ]]; then
+        CONFIG_DIR="${TRIM_DATA_SHARE_PATHS%%:*}"
+    else
+        CONFIG_DIR="$TRIM_DATA_SHARE_PATHS"
+    fi
+else
+    CONFIG_DIR="/vol1/@appshare/crowdsec"
+fi
+
+# 设置 CrowdSec 配置目录（在应用数据目录下）
+CROWDSEC_CONFIG_DIR="$CONFIG_DIR/crowdsec"
+mkdir -p "$CONFIG_DIR"
+mkdir -p "$CROWDSEC_CONFIG_DIR"
+mkdir -p "$CONFIG_DIR/log"
+mkdir -p "$CONFIG_DIR/acquis.d"
+mkdir -p "$CROWDSEC_CONFIG_DIR/hub"
+mkdir -p "$CROWDSEC_CONFIG_DIR/patterns"
+mkdir -p "$CROWDSEC_CONFIG_DIR/notifications"
+
+# 设置服务端口
+export TRIM_SERVICE_PORT=$CROWDSEC_PORT
+
+# 导出配置目录供 install_callback 使用
+export CROWDSEC_CONFIG_DIR
+export CONFIG_DIR
+
+# 导出 nginx 日志配置供 install_callback 使用
+export ENABLE_NGINX_LOGS
+export NGINX_LOG_PATH1
+export NGINX_LOG_PATH2
+
+log_msg "CrowdSec 安装初始化完成，配置目录: $CROWDSEC_CONFIG_DIR"
+echo "配置目录: $CROWDSEC_CONFIG_DIR"

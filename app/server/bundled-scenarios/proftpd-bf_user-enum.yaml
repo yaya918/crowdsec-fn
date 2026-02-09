@@ -1,0 +1,19 @@
+type: leaky
+name: crowdsecurity/proftpd-bf_user-enum
+description: "Detect proftpd user enum bruteforce"
+filter: evt.Meta.log_type == 'ftp_failed_auth'
+groupby: evt.Meta.source_ip
+distinct: evt.Meta.target_user
+leakspeed: 10s
+capacity: 5
+blackhole: 1m
+labels:
+ service: proftpd
+ remediation: true
+ confidence: 3
+ spoofable: 0
+ classification:
+  - attack.T1110
+  - attack.T1190
+ behavior: "ftp:bruteforce"
+ label: "Proftpd Bruteforce"
