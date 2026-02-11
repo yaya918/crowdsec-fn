@@ -1,5 +1,5 @@
 appname=CrowdSec
-version=1.7.6-12
+version=1.7.6-17
 display_name=CrowdSec
 desc=CrowdSec 是一个开源的、轻量级的、实时的入侵检测系统，可以检测和阻止针对服务器的恶意行为。通过分析系统日志，使用行为模式检测攻击，并通过"bouncer"组件阻止恶意IP。打包作者 B站：芽芽ol、公众号：芽芽打包匠。进群解锁神秘更新，催更直通作者！👉 QQ交流群：446562013 等你来“暴更”！此版本配置为纯本地模式，不连接云端API，所有数据处理均在本地完成。GitHub: https://github.com/crowdsecurity/crowdsec。Web管理界面基于Docker容器启动，使用 TheDuffman85/crowdsec-web-ui 项目（https://github.com/TheDuffman85/crowdsec-web-ui），提供直观的监控和告警管理功能。支持监控SSH、Nginx（包括飞牛系统默认日志和雷池WAF日志）、Samba等服务日志，能够自动检测暴力破解、Web攻击、异常访问等恶意行为，并对恶意IP进行实时拦截和封禁。注意：雷池WAF做了反向代理，只有雷池日志中存在外网真实IP地址，才可以调用防火墙进行封禁。默认IP封禁时长为4小时。本程序需要root权限运行。当配置Nginx日志路径2为雷池WAF日志时，会自动修改雷池Nginx配置文件（/vol1/1000/docker/safeline/resources/nginx/sites-enabled/）的日志记录格式为标准Nginx格式，并自动备份原配置文件。
 platform=x86

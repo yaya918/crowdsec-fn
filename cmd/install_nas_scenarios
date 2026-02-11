@@ -139,15 +139,18 @@ fi
 for scenario in "${NAS_SCENARIOS[@]}"; do
     log_msg "安装场景: $scenario"
 
+    # 提取场景名称（去掉 crowdsecurity/ 前缀）
+    scenario_filename=$(echo "$scenario" | sed 's|^crowdsecurity/||')
+
     # 优先尝试从内置规则安装
-    if [ -f "$BUNDLED_SCENARIOS_DIR/${scenario}.yaml" ]; then
-        log_msg "使用内置规则文件: $BUNDLED_SCENARIOS_DIR/${scenario}.yaml"
+    if [ -f "$BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml" ]; then
+        log_msg "使用内置规则文件: $BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml"
 
         # 确保目标目录存在
         mkdir -p "$CROWDSEC_CONFIG_DIR/scenarios"
 
         # 复制内置规则文件
-        cp "$BUNDLED_SCENARIOS_DIR/${scenario}.yaml" "$CROWDSEC_CONFIG_DIR/scenarios/${scenario}.yaml"
+        cp "$BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml" "$CROWDSEC_CONFIG_DIR/scenarios/${scenario_filename}.yaml"
 
         # 检查是否已启用，如果未启用则添加到启用列表
         if [ -f "$CROWDSEC_CONFIG_DIR/scenarios.yaml" ]; then
@@ -156,7 +159,7 @@ for scenario in "${NAS_SCENARIOS[@]}"; do
                 cat >> "$CROWDSEC_CONFIG_DIR/scenarios.yaml" << EOF
 ---
 name: $scenario
-url: file://$CROWDSEC_CONFIG_DIR/scenarios/${scenario}.yaml
+url: file://$CROWDSEC_CONFIG_DIR/scenarios/${scenario_filename}.yaml
 EOF
                 log_msg "场景 $scenario 已添加到启用列表"
             else
@@ -166,7 +169,7 @@ EOF
 
         log_msg "内置场景 $scenario 安装成功"
     else
-        log_msg "警告: 内置规则不存在: $BUNDLED_SCENARIOS_DIR/${scenario}.yaml，跳过安装"
+        log_msg "警告: 内置规则不存在: $BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml，跳过安装"
     fi
     # 移除 sleep 1 以加快安装速度
 done
@@ -176,15 +179,18 @@ log_msg "开始安装额外的严格规则（优先使用内置规则）..."
 for scenario in "${EXTRA_SCENARIOS[@]}"; do
     log_msg "安装额外场景: $scenario"
 
+    # 提取场景名称（去掉 crowdsecurity/ 前缀）
+    scenario_filename=$(echo "$scenario" | sed 's|^crowdsecurity/||')
+
     # 优先尝试从内置规则安装
-    if [ -f "$BUNDLED_SCENARIOS_DIR/${scenario}.yaml" ]; then
-        log_msg "使用内置规则文件: $BUNDLED_SCENARIOS_DIR/${scenario}.yaml"
+    if [ -f "$BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml" ]; then
+        log_msg "使用内置规则文件: $BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml"
 
         # 确保目标目录存在
         mkdir -p "$CROWDSEC_CONFIG_DIR/scenarios"
 
         # 复制内置规则文件
-        cp "$BUNDLED_SCENARIOS_DIR/${scenario}.yaml" "$CROWDSEC_CONFIG_DIR/scenarios/${scenario}.yaml"
+        cp "$BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml" "$CROWDSEC_CONFIG_DIR/scenarios/${scenario_filename}.yaml"
 
         # 检查是否已启用
         if [ -f "$CROWDSEC_CONFIG_DIR/scenarios.yaml" ]; then
@@ -192,7 +198,7 @@ for scenario in "${EXTRA_SCENARIOS[@]}"; do
                 cat >> "$CROWDSEC_CONFIG_DIR/scenarios.yaml" << EOF
 ---
 name: $scenario
-url: file://$CROWDSEC_CONFIG_DIR/scenarios/${scenario}.yaml
+url: file://$CROWDSEC_CONFIG_DIR/scenarios/${scenario_filename}.yaml
 EOF
                 log_msg "额外场景 $scenario 已添加到启用列表"
             fi
@@ -238,7 +244,7 @@ labels:
 filenames:
   - /usr/trim/logs/eventlogger_service.log
 labels:
-  type: syslog
+  type: fnnas
   service: ssh
 EOF
 

@@ -1,0 +1,33 @@
+# 飞牛系统 SSH 日志解析器
+# 用于解析飞牛系统的自定义 SSH 日志格式
+# 格式: [时间戳] [日志级别] [进程ID] sshd log: 消息内容
+# 示例: [06 10:39:20.844] [info] [2764] sshd log:  Failed password for yayaol from 192.168.31.78 port 40344 ssh2
+
+name: crowdsecurity/fnnas-ssh-logs
+description: "Parse FN NAS custom SSH log format"
+filter: "evt.Line.Labels.type == 'fnnas' && evt.Line.Labels.service == 'ssh'"
+onsuccess: next_stage
+pattern_syntax:
+  # 飞牛系统自定义日志格式
+  # 示例: [06 10:39:20.844] [info] [2764] sshd log:  Failed password for yayaol from 192.168.31.78 port 40344 ssh2
+  FNNAS_LOG_PREFIX: '\[%{NUMBER:timestamp_hour}:%{NUMBER:timestamp_minute}:%{NUMBER:timestamp_second}\.%{NUMBER:timestamp_millisecond}\] \[%{DATA:log_level}\] \[%{NUMBER:pid}\] sshd log: %{GREEDYDATA:message}'
+nodes:
+  # 解析飞牛系统自定义格式
+  - grok:
+      pattern: '%{FNNAS_LOG_PREFIX}'
+      apply_on: Line.Raw
+      statics:
+        - meta: log_type
+          value: ssh_auth
+        - parsed: program
+          value: sshd
+        - parsed: logsource
+          value: eventlogger
+        - parsed: message
+          expression: evt.Parsed.message
+        - meta: service
+          value: sshd
+        - meta: datasource_path
+          expression: evt.Line.Src
+        - meta: datasource_type
+          expression: evt.Line.Module
