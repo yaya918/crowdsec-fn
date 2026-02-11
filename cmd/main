@@ -1,0 +1,449 @@
+#!/bin/bash
+
+# CrowdSec 主控制脚本
+# 用于启动和管理 CrowdSec 服务
+
+# 设置配置目录（使用 TRIM_DATA_SHARE_PATHS 环境变量）
+if [[ -n "$TRIM_DATA_SHARE_PATHS" ]]; then
+    if [[ "$TRIM_DATA_SHARE_PATHS" == *:* ]]; then
+        DATA_DIR="${TRIM_DATA_SHARE_PATHS%%:*}"
+    else
+        DATA_DIR="$TRIM_DATA_SHARE_PATHS"
+    fi
+else
+    # 默认数据目录
+    DATA_DIR="/vol1/@appshare/crowdsec"
+fi
+
+# CrowdSec 配置目录
+CROWDSEC_CONFIG_DIR="$DATA_DIR/crowdsec"
+
+# 日志文件
+LOG_DIR="$DATA_DIR/crowdsec"
+LOG_FILE="${LOG_DIR}/info.log"
+PID_FILE="${DATA_DIR}/crowdsec.pid"
+
+log_msg() {
+    # 确保日志目录存在
+    mkdir -p "$(dirname "$LOG_FILE")"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
+}
+
+# 函数：检查进程是否在运行
+check_process() {
+    local pid="$1"
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+    
+    if kill -0 "$pid" 2>/dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# 完全停止服务函数
+stop_service() {
+    log_msg "Stopping CrowdSec service..."
+    
+    # 停止 CrowdSec Firewall Bouncer 服务
+    log_msg "Stopping CrowdSec Firewall Bouncer..."
+    if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+        systemctl stop crowdsec-firewall-bouncer 2>/dev/null || true
+        log_msg "CrowdSec Firewall Bouncer stopped"
+    else
+        log_msg "CrowdSec Firewall Bouncer is not running"
+    fi
+    
+    # 停止 CrowdSec Web UI Docker 容器
+    DOCKER_COMPOSE_CMD=""
+    if command -v docker-compose >/dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker-compose"
+    elif docker compose version >/dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker compose"
+    fi
+    
+    if [ -n "$DOCKER_COMPOSE_CMD" ]; then
+        if [ -f "${TRIM_APPDEST}/docker-compose.yml" ]; then
+            log_msg "Stopping CrowdSec Web UI Docker container..."
+            cd "${TRIM_APPDEST}"
+            $DOCKER_COMPOSE_CMD down 2>/dev/null || true
+            log_msg "CrowdSec Web UI Docker container stopped"
+        fi
+    fi
+    
+    # 如果存在PID文件，尝试优雅停止
+    if [ -r "$PID_FILE" ]; then
+        APP_PID=$(head -n 1 "$PID_FILE" | tr -d '[:space:]')
+        
+        if [ -n "$APP_PID" ] && check_process "$APP_PID"; then
+            log_msg "Stopping CrowdSec process with PID: $APP_PID"
+            
+            # 尝试优雅停止
+            kill -TERM "$APP_PID" 2>/dev/null
+            
+            # 等待进程结束
+            local wait_time=0
+            local max_wait=30
+            while [ $wait_time -lt $max_wait ]; do
+                if ! check_process "$APP_PID"; then
+                    log_msg "CrowdSec process stopped successfully"
+                    rm -f "$PID_FILE"
+                    return 0
+                fi
+                sleep 1
+                wait_time=$((wait_time + 1))
+            done
+            
+            # 如果优雅停止失败，强制停止
+            log_msg "Graceful stop failed, forcing termination"
+            kill -KILL "$APP_PID" 2>/dev/null
+            sleep 1
+            rm -f "$PID_FILE"
+        else
+            # PID文件存在但进程不存在，清理文件
+            rm -f "$PID_FILE"
+        fi
+    fi
+    
+    log_msg "CrowdSec service stopped"
+    return 0
+}
+
+# 启动服务函数
+start_service() {
+    log_msg "Starting CrowdSec service..."
+    
+    # 确保配置目录存在
+    mkdir -p "$CROWDSEC_CONFIG_DIR"
+    
+    # 修复 Safeline Nginx 日志格式（如果存在）
+    if [ -f "/var/apps/CrowdSec/cmd/fix_safeline_nginx_log.sh" ]; then
+        log_msg "Checking Safeline Nginx log format..."
+        # 从配置文件中读取第二个 nginx 日志路径
+        nginx_log_path2=""
+        if [ -f "$CROWDSEC_CONFIG_DIR/acquis.d/nginx-custom-logs.yaml" ]; then
+            nginx_log_path2=$(grep -A 3 "^---$" "$CROWDSEC_CONFIG_DIR/acquis.d/nginx-custom-logs.yaml" | grep "filenames:" -A 1 | tail -1 | sed 's/.*: *//')
+        fi
+        bash "/var/apps/CrowdSec/cmd/fix_safeline_nginx_log.sh" "$nginx_log_path2" 2>&1 || log_msg "Warning: Safeline Nginx log format check failed or skipped"
+    fi
+    
+    # 如果系统中没有配置文件，从应用安装脚本可能创建的位置复制
+    if [ ! -f "$CROWDSEC_CONFIG_DIR/config.yaml" ]; then
+        # 检查是否有备份的配置文件
+        if [ -f "${TRIM_APPDEST}/server/config.yaml" ]; then
+            cp "${TRIM_APPDEST}/server/config.yaml" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        elif [ -f "${TRIM_APPDEST}/../config.yaml" ]; then
+            cp "${TRIM_APPDEST}/../config.yaml" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        else
+            # 如果都没有，尝试从安装时可能创建的位置复制
+            if [ -d "/vol1/@appconf/CrowdSec/" ]; then
+                if [ -f "/vol1/@appconf/CrowdSec/config.yaml" ]; then
+                    cp "/vol1/@appconf/CrowdSec/config.yaml" "$CROWDSEC_CONFIG_DIR/config.yaml"
+                fi
+            fi
+        fi
+    fi
+    
+    # 确保配置为本地模式
+    if [ -f "$CROWDSEC_CONFIG_DIR/config.yaml" ]; then
+        # 备份原配置
+        cp "$CROWDSEC_CONFIG_DIR/config.yaml" "$CROWDSEC_CONFIG_DIR/config.yaml.backup.$(date +%s)" 2>/dev/null || true
+        
+        # 更新配置文件中的路径
+        sed -i "s|config_dir: /etc/crowdsec/|config_dir: $CROWDSEC_CONFIG_DIR/|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|data_dir: /var/lib/crowdsec/data/|data_dir: $DATA_DIR/data/|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|db_path: /var/lib/crowdsec/data/crowdsec.db|db_path: $DATA_DIR/data/crowdsec.db|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|simulation_path: /etc/crowdsec/simulation.yaml|simulation_path: $CROWDSEC_CONFIG_DIR/simulation.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|hub_dir: /etc/crowdsec/hub/|hub_dir: $CROWDSEC_CONFIG_DIR/hub/|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|index_path: /etc/crowdsec/hub/.index.json|index_path: $CROWDSEC_CONFIG_DIR/hub/.index.json|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|notification_dir: /etc/crowdsec/notifications/|notification_dir: $CROWDSEC_CONFIG_DIR/notifications/|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|acquisition_path: /etc/crowdsec/acquis.yaml|acquisition_path: $CROWDSEC_CONFIG_DIR/acquis.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|acquisition_dir: /etc/crowdsec/acquis.d|acquisition_dir: $DATA_DIR/acquis.d|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|profiles_path: /etc/crowdsec/profiles.yaml|profiles_path: $CROWDSEC_CONFIG_DIR/profiles.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|console_path: /etc/crowdsec/console.yaml|console_path: $CROWDSEC_CONFIG_DIR/console.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|credentials_path: /etc/crowdsec/local_api_credentials.yaml|credentials_path: $CROWDSEC_CONFIG_DIR/local_api_credentials.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        sed -i "s|credentials_path: /etc/crowdsec/online_api_credentials.yaml|credentials_path: $CROWDSEC_CONFIG_DIR/online_api_credentials.yaml|g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+        
+        # 确保API监听在 18081 端口
+        sed -i "s/listen_uri: 127.0.0.1:8080/listen_uri: 0.0.0.0:18081/g" "$CROWDSEC_CONFIG_DIR/config.yaml" 2>/dev/null || true
+        
+        # 禁用online_client
+        sed -i '/^api:/,/^$/ {
+            /online_client:/,/^\s*credentials_path:/ {
+                /enabled:/s/enabled:.*/enabled: false/
+            }
+        }' "$CROWDSEC_CONFIG_DIR/config.yaml" 2>/dev/null || true
+        
+        # 禁用prometheus - 使用更安全的sed命令避免重复
+        # 删除已有的 enabled: true/false，然后添加 enabled: false
+        sed -i '/^prometheus:/,/^$/ {
+            /^\s*enabled:/d
+        }' "$CROWDSEC_CONFIG_DIR/config.yaml" 2>/dev/null || true
+        sed -i '/^prometheus:/a\  enabled: false' "$CROWDSEC_CONFIG_DIR/config.yaml" 2>/dev/null || true
+    else
+        log_msg "ERROR: $CROWDSEC_CONFIG_DIR/config.yaml does not exist"
+        return 1
+    fi
+    
+    # 确保必要的目录结构存在
+    mkdir -p "$CROWDSEC_CONFIG_DIR/hub"
+    mkdir -p "$CROWDSEC_CONFIG_DIR/patterns"
+    mkdir -p "$CROWDSEC_CONFIG_DIR/notifications"
+    mkdir -p "$DATA_DIR/acquis.d"
+    mkdir -p "$DATA_DIR/data"
+    
+    # 复制patterns文件（如果存在）
+    if [ -d "${TRIM_APPDEST}/server/config/patterns" ]; then
+        cp -r "${TRIM_APPDEST}/server/config/patterns/"* "$CROWDSEC_CONFIG_DIR/patterns/" 2>/dev/null || true
+    fi
+    
+    # 在启动CrowdSec之前，先确保local_api_credentials.yaml中的端口为 18081
+    if [ -f "$CROWDSEC_CONFIG_DIR/local_api_credentials.yaml" ]; then
+        sed -i "s|http://127.0.0.1:[0-9]*|http://127.0.0.1:18081|g" "$CROWDSEC_CONFIG_DIR/local_api_credentials.yaml" 2>/dev/null || true
+    fi
+    
+    # 更新 Hub（如果需要）
+    if [ ! -f "$CROWDSEC_CONFIG_DIR/hub/.index.json" ]; then
+        log_msg "Hub index not found, updating hub..."
+        ${TRIM_APPDEST}/server/cscli hub update -c "$CROWDSEC_CONFIG_DIR/config.yaml" 2>/dev/null || true
+    fi
+    
+    # 确保日志和PID目录存在
+    mkdir -p "$(dirname "$PID_FILE")"
+    
+    # 在启动CrowdSec之前，确保机器已注册到本地API
+    # 我们需要先启动CrowdSec服务，然后注册机器
+    # 但在某些配置下，CrowdSec需要先有机器才能启动
+    # 所以我们先检查配置是否允许启动，然后注册机器
+    
+    log_msg "Starting CrowdSec binary from ${TRIM_APPDEST}/server/crowdsec"
+    log_msg "Using config file: $CROWDSEC_CONFIG_DIR/config.yaml"
+    log_msg "Hub index exists: [$(test -f $CROWDSEC_CONFIG_DIR/hub/.index.json && echo 'yes' || echo 'no')]"
+    log_msg "Patterns directory exists: [$(test -d $CROWDSEC_CONFIG_DIR/patterns && echo 'yes' || echo 'no')]"
+    log_msg "Service port: 18081"
+    
+    # 启动CrowdSec服务
+    ${TRIM_APPDEST}/server/crowdsec -c "$CROWDSEC_CONFIG_DIR/config.yaml" &
+    echo $! > "$PID_FILE"
+
+    # 等待服务启动（减少初始等待时间，改为1秒）
+    sleep 1
+    log_msg "Waiting for API server to be available on port 18081"
+
+    # 检查服务是否成功启动
+    local attempt=0
+    local max_attempts=10
+    while [ $attempt -lt $max_attempts ]; do
+        if [ -f "$PID_FILE" ] && [ -n "$(cat $PID_FILE 2>/dev/null)" ] && kill -0 "$(cat $PID_FILE 2>/dev/null)" 2>/dev/null; then
+            log_msg "CrowdSec service started with PID $(cat $PID_FILE), checking API availability..."
+
+            # 尝试访问API，如果成功则退出循环
+            if curl -sf "http://127.0.0.1:18081/health" > /dev/null 2>&1; then
+                log_msg "API server is available"
+                break
+            else
+                log_msg "API server not ready yet, attempt $((attempt + 1))/$max_attempts"
+            fi
+        else
+            log_msg "CrowdSec process not running, attempt $((attempt + 1))/$max_attempts"
+        fi
+        sleep 2  # 减少每次等待时间从3秒到2秒
+        attempt=$((attempt + 1))
+    done
+    
+    # 如果进程启动失败，则返回错误
+    if [ ! -f "$PID_FILE" ] || [ -z "$(cat $PID_FILE 2>/dev/null)" ] || ! kill -0 "$(cat $PID_FILE 2>/dev/null)" 2>/dev/null; then
+        log_msg "Failed to start CrowdSec service"
+        return 1
+    fi
+    
+    log_msg "CrowdSec service started successfully with PID $(cat $PID_FILE)"
+    
+    # 启动 CrowdSec Web UI Docker 容器
+    DOCKER_COMPOSE_CMD=""
+    if command -v docker-compose >/dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker-compose"
+    elif docker compose version >/dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker compose"
+    fi
+    
+    if [ -n "$DOCKER_COMPOSE_CMD" ]; then
+        if [ -f "${TRIM_APPDEST}/docker-compose.yml" ]; then
+            log_msg "Starting CrowdSec Web UI Docker container (async)..."
+
+            # 读取密码
+            if [ -f "$DATA_DIR/web_ui_password.txt" ]; then
+                WEB_UI_PASSWORD=$(cat "$DATA_DIR/web_ui_password.txt")
+                export CROWDSEC_WEB_UI_PASSWORD="$WEB_UI_PASSWORD"
+
+                cd "${TRIM_APPDEST}"
+                if $DOCKER_COMPOSE_CMD up -d 2>/dev/null; then
+                    log_msg "CrowdSec Web UI Docker container started successfully"
+                    log_msg "Web UI available at: http://127.0.0.1:3000"
+
+                    # 后台验证 Web UI 初始化状态（不阻塞主流程）
+                    {
+                        # 短暂等待容器启动
+                        sleep 5
+
+                        # 验证 Web UI 是否正常运行
+                        if docker ps | grep -q "crowdsec_web_ui"; then
+                            log_msg "Web UI 容器运行正常，后台初始化中..."
+
+                            # 轮询检查 Web UI 日志，确认同步成功（最多等待60秒）
+                            local check_count=0
+                            local max_checks=12
+                            while [ $check_count -lt $max_checks ]; do
+                                if docker logs crowdsec_web_ui 2>&1 | grep -q "Cache initialized successfully"; then
+                                    log_msg "Web UI initialization and sync completed successfully"
+                                    break
+                                fi
+                                sleep 5
+                                check_count=$((check_count + 1))
+                            done
+
+                            if [ $check_count -ge $max_checks ]; then
+                                log_msg "Warning: Web UI sync may still be in progress"
+                            fi
+                        else
+                            log_msg "Warning: Web UI container is not running"
+                        fi
+                    } &
+
+                    log_msg "Web UI 初始化检查已在后台启动"
+                else
+                    log_msg "Warning: Failed to start CrowdSec Web UI Docker container"
+                fi
+            else
+                log_msg "Warning: Web UI password file not found, skipping Web UI startup"
+            fi
+        fi
+    fi
+    
+    # 启动 CrowdSec Firewall Bouncer 服务
+    log_msg "Starting CrowdSec Firewall Bouncer..."
+    if systemctl is-enabled crowdsec-firewall-bouncer 2>/dev/null; then
+        systemctl start crowdsec-firewall-bouncer 2>/dev/null
+        
+        # 检查服务是否启动成功
+        sleep 2
+        if ! systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+            log_msg "Warning: Failed to start CrowdSec Firewall Bouncer, checking for API key issue..."
+            
+            # 检查是否是 API key 问题
+            if journalctl -u crowdsec-firewall-bouncer --no-pager -n 5 2>&1 | grep -q "access forbidden\|API key not found"; then
+                log_msg "Detected API key mismatch, attempting to fix..."
+                
+                # 重新生成 API key
+                if [ -f "${TRIM_APPDEST}/server/cscli" ] && [ -f "$CROWDSEC_CONFIG_DIR/config.yaml" ]; then
+                    ${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" bouncers delete crowdsec-firewall-bouncer 2>/dev/null || true
+                    
+                    OUTPUT=$(${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" bouncers add crowdsec-firewall-bouncer 2>&1)
+                    API_KEY=$(echo "$OUTPUT" | grep -A 2 "API key" | grep -v "API key" | grep -v "Please keep" | xargs)
+                    
+                    if [ -n "$API_KEY" ]; then
+                        # 更新配置文件
+                        BOUNCER_CONFIG="$CROWDSEC_CONFIG_DIR/bouncers/crowdsec-firewall-bouncer.yaml"
+                        if [ -f "$BOUNCER_CONFIG" ]; then
+                            sed -i "s|api_key:.*|api_key: $API_KEY|g" "$BOUNCER_CONFIG"
+                            log_msg "Updated bouncer API key in config file"
+                            
+                            # 重启服务
+                            systemctl restart crowdsec-firewall-bouncer 2>/dev/null
+                            sleep 2
+                            
+                            if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+                                log_msg "API key sync fixed, bouncer started successfully"
+                            else
+                                log_msg "Warning: Bouncer still not running after API key fix"
+                            fi
+                        fi
+                    fi
+                fi
+            else
+                log_msg "Warning: Failed to start CrowdSec Firewall Bouncer (non-API key issue)"
+                systemctl status crowdsec-firewall-bouncer --no-pager 2>&1 | tail -20 >> "$LOG_FILE"
+            fi
+        else
+            log_msg "CrowdSec Firewall Bouncer started successfully"
+        fi
+    else
+        log_msg "Warning: CrowdSec Firewall Bouncer service is not enabled, skipping startup"
+    fi
+    
+    return 0
+}
+
+# 启动应用
+start_process() {
+    log_msg "Starting CrowdSec application..."
+    
+    # 检查是否已经在运行
+    if [ -f "$PID_FILE" ] && [ -n "$(cat $PID_FILE 2>/dev/null)" ] && kill -0 "$(cat $PID_FILE 2>/dev/null)" 2>/dev/null; then
+        log_msg "CrowdSec is already running"
+        return 0
+    fi
+    
+    # 启动服务
+    if start_service; then
+        log_msg "CrowdSec application started successfully"
+        echo "CrowdSec started successfully"
+        return 0
+    else
+        log_msg "Failed to start CrowdSec application"
+        echo "Failed to start CrowdSec"
+        return 1
+    fi
+}
+
+# 停止应用
+stop_process() {
+    log_msg "Stopping CrowdSec application..."
+    
+    stop_service
+    
+    log_msg "CrowdSec application stopped"
+    echo "CrowdSec stopped"
+    return 0
+}
+
+# 检查应用状态
+status() {
+    if [ -f "$PID_FILE" ] && [ -n "$(cat $PID_FILE 2>/dev/null)" ] && kill -0 "$(cat $PID_FILE 2>/dev/null)" 2>/dev/null; then
+        log_msg "CrowdSec is running (PID: $(cat $PID_FILE))"
+        echo "CrowdSec is running (PID: $(cat $PID_FILE))"
+        return 0
+    else
+        log_msg "CrowdSec is not running"
+        echo "CrowdSec is not running"
+        return 3
+    fi
+}
+
+# 主逻辑
+case "$1" in
+    start)
+        start_process
+        exit $?
+        ;;
+    stop)
+        stop_process
+        exit $?
+        ;;
+    restart)
+        stop_process
+        sleep 2
+        start_process
+        exit $?
+        ;;
+    status)
+        status
+        exit $?
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac

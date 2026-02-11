@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# CrowdSec 配置初始化脚本
+
+# 设置配置目录
+if [[ -n "$TRIM_DATA_SHARE_PATHS" ]]; then
+    if [[ "$TRIM_DATA_SHARE_PATHS" == *:* ]]; then
+        DATA_DIR="${TRIM_DATA_SHARE_PATHS%%:*}"
+    else
+        DATA_DIR="$TRIM_DATA_SHARE_PATHS"
+    fi
+else
+    DATA_DIR="/vol1/@appshare/crowdsec"
+fi
+
+# CrowdSec 配置目录
+CROWDSEC_CONFIG_DIR="$DATA_DIR/crowdsec"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${TRIM_PKGVAR}/info.log"
+}
+
+log_msg "初始化 CrowdSec 配置..."
+
+# 读取当前的 Nginx 日志配置（如果存在）
+NGINX_CONFIG_FILE="$DATA_DIR/acquis.d/nginx-custom-logs.yaml"
+ENABLE_NGINX_LOGS="false"
+NGINX_LOG_PATH1=""
+NGINX_LOG_PATH2=""
+
+if [ -f "$NGINX_CONFIG_FILE" ]; then
+    log_msg "读取现有 Nginx 日志配置..."
+    ENABLE_NGINX_LOGS="true"
+    
+    # 从配置文件中提取日志路径
+    NGINX_LOG_PATH1=$(grep -A 2 "filenames:" "$NGINX_CONFIG_FILE" | grep "  - " | head -1 | sed 's/  - //')
+    NGINX_LOG_PATH2=$(grep -A 2 "filenames:" "$NGINX_CONFIG_FILE" | grep "  - " | tail -1 | sed 's/  - //')
+    
+    log_msg "现有配置 - 路径1: $NGINX_LOG_PATH1"
+    log_msg "现有配置 - 路径2: $NGINX_LOG_PATH2"
+fi
+
+# 导出配置供向导使用
+export ENABLE_NGINX_LOGS
+export NGINX_LOG_PATH1
+export NGINX_LOG_PATH2
+
+log_msg "CrowdSec 配置初始化完成"
+echo "配置初始化完成"

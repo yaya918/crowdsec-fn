@@ -1,0 +1,45 @@
+# CrowdSec Safeline Nginx 自定义解析器
+# 用于解析 WAF 雷池 safeline 的自定义 nginx 日志格式
+
+name: crowdsecurity/safeline-nginx-logs
+description: "Parse safeline WAF nginx logs with custom format"
+filter: "evt.Line.Labels.type in ['safeline-nginx']"
+onsuccess: next_stage
+pattern_syntax:
+  # 自定义用户名模式
+  NGCUSTOMUSER: '[a-zA-Z0-9\.\@\-\+_%]+'
+  # 自定义 URI 路径模式
+  NGCUSTOMURIPATH: "(?:/[A-Za-z0-9$.+!*'\\(\\)\\{\\},~:;=@\\#%&_\\-]*)+"
+  # 自定义 URI 路径+参数模式
+  NGCUSTOMURIPATHPARAM: '%{NGCUSTOMURIPATH}(?:%{URIPARAM})?'
+nodes:
+  # 解析 safeline 自定义格式（使用管道符分隔）
+  - grok:
+      pattern: '%{IPORHOST:remote_addr} \| - \| %{HTTPDATE:time_local} \| "%{DATA:target_fqdn}" \| "%{WORD:verb} %{DATA:request} HTTP/%{NUMBER:http_version}" \| %{NUMBER:status} %{NUMBER:body_bytes_sent} \| "%{NOTDQUOTE:http_referer}" \| "%{NOTDQUOTE:http_user_agent}"'
+      apply_on: message
+      statics:
+        - meta: log_type
+          value: http_access-log
+        - target: evt.StrTime
+          expression: evt.Parsed.time_local
+        - meta: service
+          value: safeline-nginx
+        - meta: source_ip
+          expression: "evt.Parsed.remote_addr"
+        - parsed: http_path
+          expression: "evt.Parsed.request"
+  # 解析标准 nginx 格式（兼容性）
+  - grok:
+      pattern: '%{IPORHOST:remote_addr} - (%{NGCUSTOMUSER:remote_user} )?\[%{HTTPDATE:time_local}\] "%{WORD:verb} %{DATA:request} HTTP/%{NUMBER:http_version}" %{NUMBER:status} %{NUMBER:body_bytes_sent} "%{NOTDQUOTE:http_referer}" "%{NOTDQUOTE:http_user_agent}"'
+      apply_on: message
+      statics:
+        - meta: log_type
+          value: http_access-log
+        - target: evt.StrTime
+          expression: evt.Parsed.time_local
+        - meta: service
+          value: nginx
+        - meta: source_ip
+          expression: "evt.Parsed.remote_addr"
+        - parsed: http_path
+          expression: "evt.Parsed.request"

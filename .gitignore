@@ -1,0 +1,26 @@
+# 排除备份文件
+*.bak
+*.bak*
+*.backup
+
+# 排除临时文件
+*.tmp
+*.temp
+*.log
+
+# 排除打包文件
+*.fpk
+*.zip
+*.tgz
+
+# 排除编辑器临时文件
+*~
+*.swp
+*.swo
+
+# 排除系统文件
+.DS_Store
+Thumbs.db
+
+# 排除测试目录
+test_*

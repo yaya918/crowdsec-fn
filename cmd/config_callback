@@ -1,0 +1,170 @@
+#!/bin/bash
+
+# CrowdSec 配置回调脚本
+
+# 设置配置目录
+if [[ -n "$TRIM_DATA_SHARE_PATHS" ]]; then
+    if [[ "$TRIM_DATA_SHARE_PATHS" == *:* ]]; then
+        DATA_DIR="${TRIM_DATA_SHARE_PATHS%%:*}"
+    else
+        DATA_DIR="$TRIM_DATA_SHARE_PATHS"
+    fi
+else
+    DATA_DIR="/vol1/@appshare/crowdsec"
+fi
+
+# CrowdSec 配置目录
+CROWDSEC_CONFIG_DIR="$DATA_DIR/crowdsec"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${TRIM_PKGVAR}/info.log"
+}
+
+log_msg "应用 CrowdSec 配置更改..."
+
+# 确保端口配置为 18081
+if [ -f "$CROWDSEC_CONFIG_DIR/config.yaml" ]; then
+    sed -i "s/listen_uri: 0.0.0.0:[0-9]*/listen_uri: 0.0.0.0:18081/g" "$CROWDSEC_CONFIG_DIR/config.yaml"
+fi
+
+# 配置 SSH 日志监控
+log_msg "检查 SSH 日志配置..."
+log_msg "wizard_enable_ssh_logs = '$wizard_enable_ssh_logs'"
+if [ "$wizard_enable_ssh_logs" = "true" ]; then
+    log_msg "启用 SSH 日志监控"
+    SSHD_CONFIG="/etc/ssh/sshd_config"
+    if [ -f "$SSHD_CONFIG" ]; then
+        # 备份原配置
+        cp "$SSHD_CONFIG" "${SSHD_CONFIG}.backup.$(date +%s)" 2>/dev/null || true
+        
+        # 检查并启用SyslogFacility
+        if grep -q "^#SyslogFacility AUTH" "$SSHD_CONFIG"; then
+            sed -i 's/^#SyslogFacility AUTH/SyslogFacility AUTH/' "$SSHD_CONFIG"
+            log_msg "已启用 SSH SyslogFacility"
+        elif ! grep -q "^SyslogFacility" "$SSHD_CONFIG"; then
+            echo "SyslogFacility AUTH" >> "$SSHD_CONFIG"
+            log_msg "已添加 SSH SyslogFacility 配置"
+        fi
+        
+        # 检查并启用LogLevel
+        if grep -q "^#LogLevel INFO" "$SSHD_CONFIG"; then
+            sed -i 's/^#LogLevel INFO/LogLevel INFO/' "$SSHD_CONFIG"
+            log_msg "已启用 SSH LogLevel"
+        elif ! grep -q "^LogLevel" "$SSHD_CONFIG"; then
+            echo "LogLevel INFO" >> "$SSHD_CONFIG"
+            log_msg "已添加 SSH LogLevel 配置"
+        fi
+        
+        # 重启SSH服务使配置生效
+        systemctl reload sshd > /dev/null 2>&1 || systemctl restart sshd > /dev/null 2>&1
+        log_msg "SSH服务已重载"
+    else
+        log_msg "警告: 未找到SSH配置文件，跳过SSH日志配置"
+    fi
+else
+    log_msg "SSH 日志监控未启用"
+fi
+
+# 配置 Nginx 日志监控
+log_msg "检查 Nginx 日志配置..."
+log_msg "wizard_enable_nginx_logs = '$wizard_enable_nginx_logs'"
+
+if [ "$wizard_enable_nginx_logs" = "true" ]; then
+    log_msg "启用 Nginx 日志监控"
+    
+    # 创建 nginx-custom-logs.yaml 配置文件
+    NGINX_CONFIG_FILE="$DATA_DIR/acquis.d/nginx-custom-logs.yaml"
+    
+    # 开始构建配置文件
+    echo "" > "$NGINX_CONFIG_FILE"
+    
+    # 添加第一个日志路径（如果存在）
+    if [ -n "$wizard_nginx_log_path1" ]; then
+        echo "---" >> "$NGINX_CONFIG_FILE"
+        echo "filenames:" >> "$NGINX_CONFIG_FILE"
+        echo "  - $wizard_nginx_log_path1" >> "$NGINX_CONFIG_FILE"
+        echo "labels:" >> "$NGINX_CONFIG_FILE"
+        echo "  type: nginx" >> "$NGINX_CONFIG_FILE"
+        log_msg "添加 Nginx 日志路径1: $wizard_nginx_log_path1"
+    fi
+    
+    # 添加第二个日志路径（如果存在）
+    if [ -n "$wizard_nginx_log_path2" ]; then
+        echo "---" >> "$NGINX_CONFIG_FILE"
+        echo "filenames:" >> "$NGINX_CONFIG_FILE"
+        echo "  - $wizard_nginx_log_path2" >> "$NGINX_CONFIG_FILE"
+        echo "labels:" >> "$NGINX_CONFIG_FILE"
+        echo "  type: nginx" >> "$NGINX_CONFIG_FILE"
+        log_msg "添加 Nginx 日志路径2: $wizard_nginx_log_path2"
+    fi
+    
+    # 验证配置文件是否为空
+    if [ -s "$NGINX_CONFIG_FILE" ]; then
+        log_msg "Nginx 日志配置文件创建成功: $NGINX_CONFIG_FILE"
+    else
+        log_msg "警告: Nginx 日志配置文件为空，请检查配置路径"
+        rm -f "$NGINX_CONFIG_FILE"
+    fi
+else
+    log_msg "Nginx 日志监控未启用"
+    
+    # 如果禁用了 Nginx 日志监控，删除配置文件
+    NGINX_CONFIG_FILE="$DATA_DIR/acquis.d/nginx-custom-logs.yaml"
+    if [ -f "$NGINX_CONFIG_FILE" ]; then
+        rm -f "$NGINX_CONFIG_FILE"
+        log_msg "已删除 Nginx 日志配置文件: $NGINX_CONFIG_FILE"
+    fi
+fi
+
+# 配置 Samba 日志监控
+log_msg "检查 Samba 日志配置..."
+log_msg "wizard_enable_samba_logs = '$wizard_enable_samba_logs'"
+if [ "$wizard_enable_samba_logs" = "true" ]; then
+    log_msg "启用 Samba 日志监控"
+    
+    # 创建 samba.yaml 配置文件
+    SAMBA_CONFIG_FILE="$DATA_DIR/acquis.d/samba.yaml"
+    
+    # 检查 Samba 日志目录是否存在
+    if [ -d "/var/log/samba" ]; then
+        cat > "$SAMBA_CONFIG_FILE" << 'EOF'
+---
+# Samba 日志配置
+# Samba 日志格式与 syslog 类似，使用 type: syslog 标签
+filenames:
+  # Samba 标准日志文件
+  - /var/log/samba/log.*
+  - /var/log/samba/*.log
+  # 特定服务日志
+  - /var/log/samba/smbd.log
+  - /var/log/samba/nmbd.log
+  - /var/log/samba/winbindd.log
+labels:
+  type: syslog
+  service: samba
+EOF
+        log_msg "Samba 日志配置文件创建成功: $SAMBA_CONFIG_FILE"
+    else
+        log_msg "警告: 未找到 Samba 日志目录 /var/log/samba，跳过 Samba 日志配置"
+        log_msg "Samba 服务可能未安装或日志目录未创建"
+    fi
+else
+    log_msg "Samba 日志监控未启用"
+    
+    # 如果禁用了 Samba 日志监控，删除配置文件
+    SAMBA_CONFIG_FILE="$DATA_DIR/acquis.d/samba.yaml"
+    if [ -f "$SAMBA_CONFIG_FILE" ]; then
+        rm -f "$SAMBA_CONFIG_FILE"
+        log_msg "已删除 Samba 日志配置文件: $SAMBA_CONFIG_FILE"
+    fi
+fi
+
+# 重载 CrowdSec 配置以应用新的日志采集配置
+if pkill -HUP crowdsec > /dev/null 2>&1; then
+    log_msg "CrowdSec 配置已重载，新的日志监控规则已生效"
+else
+    log_msg "提示: 可能需要手动重启 CrowdSec 服务使配置生效"
+fi
+
+echo "CrowdSec 配置已更新"

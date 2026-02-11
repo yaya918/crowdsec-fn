@@ -1,0 +1,504 @@
+#!/bin/bash
+
+# CrowdSec 家用NAS场景规则安装脚本
+# 专为飞牛NAS优化的安全检测规则配置
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${TRIM_PKGVAR}/info.log"
+}
+
+# 设置配置目录（使用 TRIM_DATA_SHARE_PATHS 环境变量）
+if [[ -n "$TRIM_DATA_SHARE_PATHS" ]]; then
+    if [[ "$TRIM_DATA_SHARE_PATHS" == *:* ]]; then
+        DATA_DIR="${TRIM_DATA_SHARE_PATHS%%:*}"
+    else
+        DATA_DIR="$TRIM_DATA_SHARE_PATHS"
+    fi
+else
+    # 默认数据目录
+    DATA_DIR="/vol1/@appshare/crowdsec"
+fi
+
+# CrowdSec 配置目录
+CROWDSEC_CONFIG_DIR="$DATA_DIR/crowdsec"
+CONFIG_DIR="$DATA_DIR"
+
+log_msg "开始配置家用NAS场景规则..."
+log_msg "配置目录: $CROWDSEC_CONFIG_DIR"
+
+# 启用SSH日志记录（使用飞牛系统日志，不修改系统配置）
+log_msg "配置SSH日志记录（使用飞牛系统日志）..."
+log_msg "SSH日志将直接从 /usr/trim/logs/eventlogger_service.log 读取"
+log_msg "无需修改 /etc/ssh/sshd_config 配置"
+
+# 等待CrowdSec服务完全启动（优化：减少初始等待和检查间隔）
+log_msg "等待CrowdSec服务启动..."
+MAX_WAIT=30
+WAIT_TIME=0
+while [ $WAIT_TIME -lt $MAX_WAIT ]; do
+    # 优先检查 API 服务是否可用（比 cscli status 更快）
+    if curl -sf "http://127.0.0.1:18081/health" > /dev/null 2>&1; then
+        log_msg "CrowdSec服务已就绪"
+        break
+    fi
+    sleep 1  # 减少检查间隔从2秒到1秒
+    WAIT_TIME=$((WAIT_TIME + 1))
+done
+
+if [ $WAIT_TIME -ge $MAX_WAIT ]; then
+    log_msg "警告: 等待CrowdSec服务超时，继续尝试安装规则..."
+fi
+
+# 定义适合家用NAS的场景规则集合
+# 这些规则是针对家庭NAS环境优化的，包括SSH、Web服务、FTP等常见服务
+NAS_SCENARIOS=(
+    # SSH安全规则 - 防止暴力破解
+    "crowdsecurity/ssh-bf"
+    "crowdsecurity/ssh-slow-bf"
+    "crowdsecurity/ssh-time-based-bf"
+    
+    # SMB/Samba安全规则 - 防止暴力破解和未授权访问
+    "crowdsecurity/smb-bf"
+    
+    # FTP安全规则 - 防止暴力破解 (支持多种 FTP 服务器)
+    "crowdsecurity/vsftpd-bf"
+    "crowdsecurity/proftpd-bf"
+    "crowdsecurity/proftpd-bf_user-enum"
+    
+    # Web服务器规则 - Nginx/Apache常见攻击
+    "crowdsecurity/http-probing"
+    "crowdsecurity/http-crawl-non_statics"
+    "crowdsecurity/http-bad-user-agent"
+    "crowdsecurity/http-sqli-probing"
+    "crowdsecurity/http-xss-probing"
+    
+    # Web应用攻击防护
+    "crowdsecurity/http-path-traversal-probing"
+    "crowdsecurity/http-sensitive-files"
+    "crowdsecurity/http-admin-interface-probing"
+    
+    # 防止DDoS和扫描
+    "crowdsecurity/http-generic-bf"
+    "crowdsecurity/http-generic-test"
+    
+    # 其他常见攻击
+    "crowdsecurity/http-open-proxy"
+    "crowdsecurity/http-cve-probing"
+    "crowdsecurity/http-backdoors-attempts"
+)
+
+# 额外的场景规则（可选，更严格的检测）
+EXTRA_SCENARIOS=(
+    "crowdsecurity/ssh-generic-test"
+    "crowdsecurity/ssh-refused-conn"
+    "crowdsecurity/nginx-req-limit-exceeded"
+    "crowdsecurity/http-wordpress-scan"
+    "crowdsecurity/http-w00tw00t"
+)
+
+# 集合安装顺序（先安装集合，再安装单独的场景）
+NAS_COLLECTIONS=(
+    "crowdsecurity/sshd"
+    "crowdsecurity/nginx"
+    "crowdsecurity/apache2"
+    "crowdsecurity/base-http"
+)
+
+log_msg "开始安装NAS核心场景规则（使用内置规则，无需在线下载）..."
+BUNDLED_SCENARIOS_DIR="${TRIM_APPDEST}/server/bundled-scenarios"
+BUNDLED_PARSERS_DIR="${TRIM_APPDEST}/server/bundled-parsers"
+BUNDLED_CONTEXTS_DIR="${TRIM_APPDEST}/server/bundled-contexts"
+
+# 安装内置 parsers
+log_msg "安装内置 parsers..."
+if [ -d "$BUNDLED_PARSERS_DIR" ]; then
+    for stage in s00-raw s01-parse s02-enrich; do
+        if [ -d "$BUNDLED_PARSERS_DIR/$stage" ]; then
+            mkdir -p "$CROWDSEC_CONFIG_DIR/parsers/$stage"
+            cp -r "$BUNDLED_PARSERS_DIR/$stage"/* "$CROWDSEC_CONFIG_DIR/parsers/$stage/"
+            log_msg "已安装 $stage parsers"
+        fi
+    done
+    log_msg "内置 parsers 安装完成"
+else
+    log_msg "警告: 内置 parsers 目录不存在"
+fi
+
+# 安装内置 contexts
+log_msg "安装内置 contexts..."
+if [ -d "$BUNDLED_CONTEXTS_DIR" ]; then
+    mkdir -p "$CROWDSEC_CONFIG_DIR/contexts"
+    cp -r "$BUNDLED_CONTEXTS_DIR"/* "$CROWDSEC_CONFIG_DIR/contexts/"
+    log_msg "内置 contexts 安装完成"
+else
+    log_msg "警告: 内置 contexts 目录不存在"
+fi
+
+# 安装内置 scenarios
+for scenario in "${NAS_SCENARIOS[@]}"; do
+    log_msg "安装场景: $scenario"
+
+    # 提取场景名称（去掉 crowdsecurity/ 前缀）
+    scenario_filename=$(echo "$scenario" | sed 's|^crowdsecurity/||')
+
+    # 优先尝试从内置规则安装
+    if [ -f "$BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml" ]; then
+        log_msg "使用内置规则文件: $BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml"
+
+        # 确保目标目录存在
+        mkdir -p "$CROWDSEC_CONFIG_DIR/scenarios"
+
+        # 复制内置规则文件
+        cp "$BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml" "$CROWDSEC_CONFIG_DIR/scenarios/${scenario_filename}.yaml"
+
+        # 检查是否已启用，如果未启用则添加到启用列表
+        if [ -f "$CROWDSEC_CONFIG_DIR/scenarios.yaml" ]; then
+            if ! grep -q "name: $scenario" "$CROWDSEC_CONFIG_DIR/scenarios.yaml"; then
+                # 创建启用配置
+                cat >> "$CROWDSEC_CONFIG_DIR/scenarios.yaml" << EOF
+---
+name: $scenario
+url: file://$CROWDSEC_CONFIG_DIR/scenarios/${scenario_filename}.yaml
+EOF
+                log_msg "场景 $scenario 已添加到启用列表"
+            else
+                log_msg "场景 $scenario 已在启用列表中"
+            fi
+        fi
+
+        log_msg "内置场景 $scenario 安装成功"
+    else
+        log_msg "警告: 内置规则不存在: $BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml，跳过安装"
+    fi
+    # 移除 sleep 1 以加快安装速度
+done
+
+# 安装额外的严格规则（优先使用内置规则）
+log_msg "开始安装额外的严格规则（优先使用内置规则）..."
+for scenario in "${EXTRA_SCENARIOS[@]}"; do
+    log_msg "安装额外场景: $scenario"
+
+    # 提取场景名称（去掉 crowdsecurity/ 前缀）
+    scenario_filename=$(echo "$scenario" | sed 's|^crowdsecurity/||')
+
+    # 优先尝试从内置规则安装
+    if [ -f "$BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml" ]; then
+        log_msg "使用内置规则文件: $BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml"
+
+        # 确保目标目录存在
+        mkdir -p "$CROWDSEC_CONFIG_DIR/scenarios"
+
+        # 复制内置规则文件
+        cp "$BUNDLED_SCENARIOS_DIR/${scenario_filename}.yaml" "$CROWDSEC_CONFIG_DIR/scenarios/${scenario_filename}.yaml"
+
+        # 检查是否已启用
+        if [ -f "$CROWDSEC_CONFIG_DIR/scenarios.yaml" ]; then
+            if ! grep -q "name: $scenario" "$CROWDSEC_CONFIG_DIR/scenarios.yaml"; then
+                cat >> "$CROWDSEC_CONFIG_DIR/scenarios.yaml" << EOF
+---
+name: $scenario
+url: file://$CROWDSEC_CONFIG_DIR/scenarios/${scenario_filename}.yaml
+EOF
+                log_msg "额外场景 $scenario 已添加到启用列表"
+            fi
+        fi
+
+        log_msg "内置额外场景 $scenario 安装成功"
+    else
+        # 如果没有内置规则，尝试从在线安装
+        log_msg "内置规则不存在，尝试从在线安装: $scenario"
+        if ${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" scenarios install "$scenario" --force 2>&1 | tee -a "${TRIM_PKGVAR}/info.log"; then
+            log_msg "额外场景 $scenario 在线安装成功"
+        else
+            log_msg "警告: 额外场景 $scenario 在线安装失败（网络问题或规则不存在）"
+        fi
+    fi
+    # 移除 sleep 1 以加快安装速度
+done
+
+# 创建NAS专用的acquisition配置文件
+log_msg "创建NAS专用日志采集配置..."
+mkdir -p "$CONFIG_DIR/acquis.d"
+
+# 确保必要的解析器已安装
+log_msg "确保必要的解析器已安装..."
+${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" parsers install crowdsecurity/syslog-logs 2>/dev/null || true
+${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" parsers install crowdsecurity/dateparse-enrich 2>/dev/null || true
+log_msg "必要解析器检查完成"
+
+# 创建系统日志采集配置（智能检测实际存在的文件）
+log_msg "创建系统日志采集配置..."
+
+# 飞牛系统将SSH登录日志记录到 eventlogger_service.log
+# 使用 syslog 类型标签让 CrowdSec 正确解析日志
+cat > "$CONFIG_DIR/acquis.d/syslog.yaml" << 'EOF'
+---
+# 系统日志 - syslog (包含系统服务等日志)
+filenames:
+  - /var/log/syslog
+labels:
+  type: syslog
+---
+# SSH 认证日志 - eventlogger_service.log (飞牛系统日志)
+filenames:
+  - /usr/trim/logs/eventlogger_service.log
+labels:
+  type: fnnas
+  service: ssh
+EOF
+
+# 检查其他可能的日志文件（用于兼容其他系统）
+if [ -f "/var/log/kern.log" ] && [ -s "/var/log/kern.log" ]; then
+    cat >> "$CONFIG_DIR/acquis.d/syslog.yaml" << 'EOF'
+---
+# 系统日志 - kern.log
+filenames:
+  - /var/log/kern.log
+labels:
+  type: syslog
+EOF
+    log_msg "添加 kern.log 到日志采集配置"
+fi
+
+if [ -f "/var/log/messages" ] && [ -s "/var/log/messages" ]; then
+    cat >> "$CONFIG_DIR/acquis.d/syslog.yaml" << 'EOF'
+---
+# 系统日志 - messages (RHEL/CentOS)
+filenames:
+  - /var/log/messages
+labels:
+  type: syslog
+EOF
+    log_msg "添加 messages 到日志采集配置"
+fi
+
+if [ -f "/var/log/secure" ] && [ -s "/var/log/secure" ]; then
+    cat >> "$CONFIG_DIR/acquis.d/syslog.yaml" << 'EOF'
+---
+# SSH日志 - secure (RHEL/CentOS)
+filenames:
+  - /var/log/secure
+labels:
+  type: syslog
+EOF
+    log_msg "添加 secure 到日志采集配置"
+fi
+
+log_msg "系统日志采集配置完成（使用 /var/log/syslog 和 /usr/trim/logs/eventlogger_service.log）"
+
+# 创建Nginx日志采集配置（智能检测）
+if [ -d "/var/log/nginx" ]; then
+    log_msg "配置 Nginx 日志采集..."
+    cat > "$CONFIG_DIR/acquis.d/nginx.yaml" << 'EOF'
+---
+# 标准 Nginx 访问日志
+filenames:
+  - /var/log/nginx/access.log
+  - /var/log/nginx/*.log
+labels:
+  type: nginx
+---
+# Nginx 错误日志
+filenames:
+  - /var/log/nginx/error.log
+labels:
+  type: nginx
+EOF
+        log_msg "添加标准 Nginx 日志到采集配置"
+else
+    log_msg "未找到标准 Nginx 日志目录 /var/log/nginx，跳过配置"
+    log_msg "飞牛系统 Nginx 日志通过向导配置添加到 nginx-custom-logs.yaml"
+fi
+
+# 创建Apache日志采集配置（智能检测）
+if [ -d "/var/log/apache2" ] || [ -d "/var/log/httpd" ]; then
+    log_msg "配置 Apache 日志采集..."
+    cat > "$CONFIG_DIR/acquis.d/apache2.yaml" << 'EOF'
+---
+# Apache 日志配置
+EOF
+    
+    if [ -d "/var/log/apache2" ]; then
+        cat >> "$CONFIG_DIR/acquis.d/apache2.yaml" << 'EOF'
+---
+# Apache 访问日志 (Debian/Ubuntu)
+filenames:
+  - /var/log/apache2/access.log
+  - /var/log/apache2/*.log
+labels:
+  type: apache2
+---
+# Apache 错误日志
+filenames:
+  - /var/log/apache2/error.log
+labels:
+  type: apache2
+EOF
+    fi
+    
+    if [ -d "/var/log/httpd" ]; then
+        cat >> "$CONFIG_DIR/acquis.d/apache2.yaml" << 'EOF'
+---
+# Apache 日志 (RHEL/CentOS - httpd)
+filenames:
+  - /var/log/httpd/access_log
+  - /var/log/httpd/error_log
+  - /var/log/httpd/*.log
+labels:
+  type: apache2
+EOF
+    fi
+    log_msg "Apache 日志采集配置完成"
+else
+    log_msg "未找到 Apache 日志目录，跳过配置"
+fi
+
+# 创建FTP日志采集配置（智能检测）
+if [ -f "/var/log/vsftpd.log" ] || [ -d "/var/log/vsftpd" ] || [ -d "/var/log/proftpd" ]; then
+    log_msg "配置 FTP 日志采集..."
+    cat > "$CONFIG_DIR/acquis.d/ftp.yaml" << 'EOF'
+---
+# FTP 日志配置
+EOF
+    
+    if [ -f "/var/log/vsftpd.log" ] || [ -d "/var/log/vsftpd" ]; then
+        cat >> "$CONFIG_DIR/acquis.d/ftp.yaml" << 'EOF'
+---
+# vsftpd 日志
+filenames:
+  - /var/log/vsftpd.log
+  - /var/log/vsftpd/*.log
+labels:
+  type: syslog
+EOF
+    fi
+    
+    if [ -d "/var/log/proftpd" ]; then
+        cat >> "$CONFIG_DIR/acquis.d/ftp.yaml" << 'EOF'
+---
+# proftpd 日志
+filenames:
+  - /var/log/proftpd/access.log
+  - /var/log/proftpd/*.log
+labels:
+  type: syslog
+EOF
+    fi
+    log_msg "FTP 日志采集配置完成"
+else
+    log_msg "未找到 FTP 日志，跳过配置"
+fi
+
+# 创建SMB/CIFS日志采集配置
+if [ -d "/var/log/samba" ]; then
+    log_msg "配置 Samba 日志采集..."
+    cat > "$CONFIG_DIR/acquis.d/smb.yaml" << 'EOF'
+---
+# Samba 日志配置
+# Samba 日志格式与 syslog 类似，使用 type: syslog 标签
+filenames:
+  # Samba 标准日志文件
+  - /var/log/samba/log.*
+  - /var/log/samba/*.log
+  # 特定服务日志
+  - /var/log/samba/smbd.log
+  - /var/log/samba/nmbd.log
+  - /var/log/samba/winbindd.log
+labels:
+  type: syslog
+  service: samba
+EOF
+    log_msg "Samba 日志采集配置完成"
+    log_msg "Samba 日志目录: /var/log/samba"
+else
+    log_msg "未找到 Samba 日志目录 /var/log/samba，跳过配置"
+    log_msg "Samba 日志通常位于 /var/log/samba/ 目录"
+fi
+
+# 配置白名单 - 防止误封本地网络
+log_msg "配置白名单规则..."
+mkdir -p "$CROWDSEC_CONFIG_DIR/parsers/s02-enrich"
+cat > "$CROWDSEC_CONFIG_DIR/parsers/s02-enrich/whitelists.yaml" << 'EOF'
+# CrowdSec 白名单配置
+# 用于防止误封本地网络和信任的IP地址
+
+name: crowdsecurity/whitelists
+description: "Whitelist events from local networks and trusted IPs"
+whitelist:
+  reason: "Whitelisted IP - Local Network"
+  ip:
+    # 本地回环地址
+    - "127.0.0.1"
+    - "::1"
+  cidr:
+    # 本地局域网 (RFC1918)
+    - "127.0.0.0/8"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+    # 链路本地地址
+    - "169.254.0.0/16"
+    - "fe80::/10"
+EOF
+log_msg "白名单配置文件已创建"
+
+# 更新profiles.yaml - 为家用NAS优化决策配置
+log_msg "优化决策配置..."
+if [ -f "$CROWDSEC_CONFIG_DIR/profiles.yaml" ]; then
+    # 备份原配置
+    cp "$CROWDSEC_CONFIG_DIR/profiles.yaml" "$CROWDSEC_CONFIG_DIR/profiles.yaml.backup.$(date +%s)"
+    
+    # 创建适合家用NAS的配置
+    cat > "$CROWDSEC_CONFIG_DIR/profiles.yaml" << 'EOF'
+# 默认IP阻止配置
+name: default_ip_remediation
+filters:
+ - Alert.Remediation == true && Alert.GetScope() == "Ip"
+decisions:
+ - type: ban
+   duration: 4h
+on_success: break
+
+---
+# Bouncer专用配置
+name: crowdsec-firewall-bouncer
+filters:
+ - "Alert.Remediation == true && Alert.GetScope() == 'Ip'"
+decisions:
+ - type: ban
+   duration: 4h
+on_success: break
+EOF
+    log_msg "决策配置已更新"
+fi
+
+# 重载CrowdSec配置
+log_msg "重载CrowdSec配置..."
+if pkill -HUP crowdsec > /dev/null 2>&1; then
+    log_msg "CrowdSec配置已重载"
+else
+    log_msg "提示: 可能需要手动重启CrowdSec服务使配置生效"
+fi
+
+# 显示已安装的规则
+log_msg "显示已安装的场景规则..."
+${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" scenarios list 2>&1 | tee -a "${TRIM_PKGVAR}/info.log" || true
+
+log_msg "家用NAS场景规则配置完成！"
+log_msg "=========================================="
+log_msg "已安装的核心规则包括:"
+log_msg "  - SSH暴力破解防护"
+log_msg "  - SMB/Samba暴力破解防护"
+log_msg "  - FTP暴力破解防护"
+log_msg "  - Web服务器安全防护 (Nginx/Apache)"
+log_msg "  - SQL注入和XSS攻击探测防护"
+log_msg "  - 网络扫描和探测防护"
+log_msg "  - 系统日志监控"
+log_msg "  - 本地网络白名单"
+log_msg "=========================================="
+
+# 验证 Samba 和 FTP 规则是否已安装
+log_msg "验证 Samba 和 FTP 规则安装状态..."
+${TRIM_APPDEST}/server/cscli -c "$CROWDSEC_CONFIG_DIR/config.yaml" scenarios list 2>&1 | grep -E "smb|ftp" || log_msg "提示: Samba/FTP 规则可能需要从 Hub 安装"
+log_msg "=========================================="
