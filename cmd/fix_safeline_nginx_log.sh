@@ -32,7 +32,8 @@ fi
 # 从日志路径推导 Safeline Nginx 配置目录
 # 日志路径示例: /vol1/1000/docker/safeline/logs/ 或 /vol1/1000/docker/safeline/logs/nginx/safeline/accesslog_*
 # 配置目录示例: /vol1/1000/docker/safeline/resources/nginx/sites-enabled
-SAFELINE_NGINX_DIR=$(echo "$NGINX_LOG_PATH2" | sed -E 's|(.*/safeline).*|\1/resources/nginx/sites-enabled|')
+# 使用非贪婪匹配，只匹配第一个 safeline 目录
+SAFELINE_NGINX_DIR=$(echo "$NGINX_LOG_PATH2" | sed -E 's|(/[^/]*safeline).*|\1/resources/nginx/sites-enabled|')
 
 # 检查目录是否存在
 if [ ! -d "$SAFELINE_NGINX_DIR" ]; then
